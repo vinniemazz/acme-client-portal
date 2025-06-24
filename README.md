@@ -10,11 +10,38 @@ Enterprise client portal application providing secure access to project status, 
 - Support ticket system
 
 ## Tech Stack
-- Frontend: React.js
-- Backend: Node.js/Express
-- Database: PostgreSQL
-- Authentication: Auth0
+- **Backend**: Django 4.2 + Django REST Framework
+- **Database**: PostgreSQL
+- **Task Queue**: Celery + Redis
+- **Authentication**: JWT + OAuth2
+- **Deployment**: Docker + Gunicorn
+- **Testing**: pytest
 
 ## Getting Started
-[Installation and setup instructions]# acme-client-portal
-Customer portal application for Acme Co's enterprise clients
+
+### Prerequisites
+- Python 3.11+
+- PostgreSQL 13+
+- Redis (for task queue)
+
+### Installation
+```bash
+# Clone repository
+git clone https://github.com/yourusername/acme-client-portal.git
+cd acme-client-portal
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up database
+python manage.py migrate
+
+# Create superuser
+python manage.py createsuperuser
+
+# Run development server
+python manage.py runserver
