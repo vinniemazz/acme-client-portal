@@ -1,0 +1,223 @@
+const axios = require('axios');
+
+// Configuration
+const CONFIG = {
+    clickup: {
+        token: 'pk_156215447_EB7DLH8NFPRV59H2IIU60WYKHZRLYXNP',
+        listId: '901319390712'
+    },
+    openweather: {
+        token: '5f356336565aa2f5d51d77ef8e44c475'
+    }
+};
+
+class WeatherIntegration {
+    constructor(config) {
+        this.config = config;
+        this.clickupHeaders = {
+            'Authorization': config.clickup.token,
+            'Content-Type': 'application/json'
+        };
+    }
+
+    async getTasks() {
+        try {
+            const response = await axios.get(
+                `https://api.clickup.com/api/v2/list/${this.config.clickup.listId}/task`,
+                { headers: this.clickupHeaders }
+            );
+            return response.data.tasks;
+        } catch (error) {
+            console.error('Error fetching tasks:', error.message);
+            throw error;
+        }
+    }
+
+    getLocation(task) {
+        const locationField = task.custom_fields?.find(cf => cf.name === 'Location');
+        return locationField?.value?.formatted_address || null;
+    }
+
+    getStartDate(task) {
+        // Use the built-in start_date field directly
+        return task.start_date ? new Date(parseInt(task.start_date)) : null;
+    }
+
+    getWeatherFieldId(task) {
+        const weatherField = task.custom_fields?.find(cf => cf.name === 'Weather Condition');
+        return weatherField?.id || null;
+    }
+
+    getApiNoteFieldId(task) {
+        const apiNoteField = task.custom_fields?.find(cf => cf.name === 'API Note');
+        return apiNoteField?.id || null;
+    }
+
+    mapWeatherToUUID(condition) {
+        const mappings = {
+            'clear sky': 'c6cbf1c2-19fd-4c54-9c53-31659ccc7d73',
+            'few clouds': '4289ad42-bff2-4221-a7c3-f41e011bb222',
+            'scattered clouds': 'a6074787-fce7-4b75-bb02-3cf12a3360f7',
+            'broken clouds': 'b77171e6-4b9c-4048-a383-ebefce503079',
+            'overcast clouds': '745bb21f-41cc-4e46-8a09-638740b4606e',
+            'light rain': 'd8e4a5cd-db8a-49fd-b097-27218f73f415',
+            'moderate rain': '84c03779-db42-4739-ad83-faf5621ce985',
+            'shower rain': '2e7ad97c-2b14-4971-9b78-009dd5789f1c',
+            'thunderstorm': '3b59cc76-5901-4799-b9bc-ad8d12cc39e6',
+            'snow': 'feea553e-f3d1-4c18-9509-cb7681ce4055',
+            'mist': '70f4f3e3-c721-4a60-a75c-e967f7c76800',
+            'fog': '17b2891b-1e8c-4c84-8a61-bc30339736ec'
+        };
+        return mappings[condition.toLowerCase()] || null;
+    }
+
+    async getWeather(location, date) {
+        try {
+            // Get coordinates
+            const geoResponse = await axios.get('http://api.openweathermap.org/geo/1.0/direct', {
+                params: { q: location, limit: 1, appid: this.config.openweather.token }
+            });
+
+            if (!geoResponse.data.length) {
+                throw new Error(`Location not found: ${location}`);
+            }
+
+            const { lat, lon } = geoResponse.data[0];
+
+            // Check if date is within 5-day forecast range
+            const targetDate = new Date(date);
+            const now = new Date();
+            const daysDiff = Math.ceil((targetDate - now) / (1000 * 60 * 60 * 24));
+
+            if (daysDiff > 5) {
+                throw new Error(`Weather forecast only available for next 5 days. Requested date is ${daysDiff} days away.`);
+            }
+
+            // Get weather forecast
+            const weatherResponse = await axios.get('https://api.openweathermap.org/data/2.5/forecast', {
+                params: { lat, lon, appid: this.config.openweather.token }
+            });
+
+            // Find closest forecast to target date
+            const targetTime = targetDate.getTime();
+            let closest = weatherResponse.data.list[0];
+            let closestDiff = Math.abs(new Date(closest.dt * 1000) - targetTime);
+
+            for (const forecast of weatherResponse.data.list) {
+                const diff = Math.abs(new Date(forecast.dt * 1000) - targetTime);
+                if (diff < closestDiff) {
+                    closestDiff = diff;
+                    closest = forecast;
+                }
+            }
+
+            return closest.weather[0].description;
+        } catch (error) {
+            console.error(`Weather API error for ${location}:`, error.message);
+            throw error;
+        }
+    }
+
+    async updateField(taskId, fieldId, value) {
+        try {
+            console.log(`Updating task ${taskId} with UUID: ${value}`);
+
+            await axios.post(
+                `https://api.clickup.com/api/v2/task/${taskId}/field/${fieldId}`,
+                { value: value },
+                { headers: this.clickupHeaders }
+            );
+
+            console.log('✅ Successfully updated field');
+        } catch (error) {
+            console.error('❌ Update failed:', error.response?.data || error.message);
+            throw error;
+        }
+    }
+
+    async logError(taskId, error) {
+        try {
+            const tasks = await this.getTasks();
+            const task = tasks.find(t => t.id === taskId);
+            if (!task) return;
+
+            const apiNoteFieldId = this.getApiNoteFieldId(task);
+            if (apiNoteFieldId) {
+                const timestamp = new Date().toISOString();
+                const logEntry = error ? `[${timestamp}] ${error}` : '';
+                await axios.post(
+                    `https://api.clickup.com/api/v2/task/${taskId}/field/${apiNoteFieldId}`,
+                    { value: logEntry },
+                    { headers: this.clickupHeaders }
+                );
+            }
+        } catch (logError) {
+            console.error('Error logging to API Note field:', logError.message);
+        }
+    }
+
+    async processTask(task) {
+        console.log(`\n📋 Processing: ${task.name}`);
+
+        const location = this.getLocation(task);
+        const startDate = this.getStartDate(task);
+
+        // Debug: show exactly what we're getting
+        console.log(`🗓️  Raw start_date: ${task.start_date}`);
+        console.log(`🗓️  Parsed start date: ${startDate}`);
+        console.log(`📍 Location: ${location}`);
+
+        if (!location || !startDate) {
+            console.log('❌ Missing location or start date');
+            return { error: 'Missing required fields' };
+        }
+
+        try {
+            // Get weather
+            const weatherCondition = await this.getWeather(location, startDate);
+            console.log(`🌤️  Weather condition: ${weatherCondition}`);
+
+            // Map to UUID
+            const uuid = this.mapWeatherToUUID(weatherCondition);
+            if (!uuid) {
+                console.log('❌ No matching dropdown option');
+                return { error: 'No matching weather option' };
+            }
+
+            // Update field
+            const fieldId = this.getWeatherFieldId(task);
+            await this.updateField(task.id, fieldId, uuid);
+
+            // Clear any previous error logs
+            await this.logError(task.id, '');
+
+            return { success: true, weather: weatherCondition };
+        } catch (error) {
+            console.log(`❌ Error: ${error.message}`);
+            await this.logError(task.id, error.message);
+            return { error: error.message };
+        }
+    }
+
+    async run() {
+        console.log('🚀 Starting weather integration (using START DATE field)...\n');
+
+        try {
+            const tasks = await this.getTasks();
+            console.log(`Found ${tasks.length} tasks\n`);
+
+            for (const task of tasks) {
+                await this.processTask(task);
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limiting
+            }
+
+            console.log('\n✅ Integration complete!');
+        } catch (error) {
+            console.error('💥 Integration failed:', error.message);
+        }
+    }
+}
+
+// Run the integration
+const integration = new WeatherIntegration(CONFIG);
+integration.run();
